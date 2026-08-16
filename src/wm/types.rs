@@ -31,6 +31,7 @@ pub struct ManagedWindow {
     pub frame_geometry: FrameGeometry,
     #[serde(rename = "noBorder")]
     pub no_border: bool,
+    pub minimized: bool,
 }
 
 pub fn find_best_match<'a>(
@@ -122,6 +123,7 @@ mod tests {
                 height: 50,
             },
             no_border: false,
+            minimized: false,
         }
     }
 

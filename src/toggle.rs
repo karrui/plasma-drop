@@ -84,12 +84,12 @@ impl ToggleService {
             .filter(|name| *name != app_name)
             .map(str::to_string);
         let target = require_app(&registry, app_name)?;
-        let target_visible = target.visible;
+        let registry_visible = target.visible;
         let target_config = target.config.clone();
         let target_tracked_window_id = target.tracked_window_id.clone();
         drop(registry);
 
-        let screen_for_show = if target_visible {
+        let screen_for_show = if registry_visible {
             None
         } else {
             Some(self.current_screen().await?)
@@ -99,30 +99,21 @@ impl ToggleService {
             self.hide_app(&other).await?;
         }
 
-        let target_visible = if target_visible {
-            let window = self
-                .resolve_existing_window(&target_config, target_tracked_window_id)
-                .await?;
-            if let Some(window) = window {
-                let mut registry = self.registry.lock().await;
-                if let Some(app) = registry.managed_app_mut(app_name) {
-                    app.tracked_window_id = Some(window.internal_id);
-                    app.visible = true;
-                }
-                drop(registry);
-                true
-            } else {
-                let mut registry = self.registry.lock().await;
-                if let Some(app) = registry.managed_app_mut(app_name) {
-                    app.tracked_window_id = None;
-                }
-                registry.set_visible(app_name, false);
-                drop(registry);
-                false
-            }
-        } else {
-            false
-        };
+        // The window's actual minimized state can drift from plasma-drop's
+        // own tracking (e.g. the user minimized or restored it via the
+        // taskbar instead of the hotkey), so re-derive visibility from
+        // reality here instead of trusting the stored flag.
+        let window = self
+            .resolve_existing_window(&target_config, target_tracked_window_id)
+            .await?;
+        let target_visible = window.as_ref().is_some_and(|window| !window.minimized);
+
+        let mut registry = self.registry.lock().await;
+        if let Some(app) = registry.managed_app_mut(app_name) {
+            app.tracked_window_id = window.map(|window| window.internal_id);
+        }
+        registry.set_visible(app_name, target_visible);
+        drop(registry);
 
         if target_visible {
             self.hide_app(app_name).await
@@ -139,9 +130,6 @@ impl ToggleService {
         drop(registry);
 
         let window = self.resolve_window(&config, existing_id).await?;
-        if config.hide_decorations {
-            self.hide_window_decorations(app_name, &window).await?;
-        }
 
         let screen = match preferred_screen {
             Some(screen) => screen,
@@ -153,12 +141,28 @@ impl ToggleService {
         let visible_rect = screen.placement_rect(&config.placement);
         let screens = self.current_screens().await;
         let hidden_rect = hidden_rect_for_screens(&screens, &visible_rect);
-        if let Some(plan) = TransitionPlan::from_config(
+        let plan = TransitionPlan::from_config(
             &config.animation,
             &visible_rect,
             &hidden_rect,
             TransitionPhase::Show,
-        ) {
+        );
+        // Prime the animation's starting geometry while the window is still
+        // minimized (invisible), so un-minimizing it below doesn't cause a
+        // one-frame flash at its old resting spot before the slide-in starts.
+        if let Some(plan) = &plan {
+            self.apply_window_state(&window.internal_id, plan.setup_state())
+                .await?;
+        }
+
+        self.kwin
+            .set_window_minimized(&window.internal_id, false)
+            .await?;
+        if config.hide_decorations {
+            self.hide_window_decorations(app_name, &window).await?;
+        }
+
+        if let Some(plan) = plan {
             self.run_animation(&window.internal_id, &plan, true).await?;
         } else {
             self.apply_geometry(&window.internal_id, &visible_rect)
@@ -204,12 +208,24 @@ impl ToggleService {
                 &hidden_rect,
                 TransitionPhase::Hide,
             ) {
+                self.apply_window_state(&window.internal_id, plan.setup_state())
+                    .await?;
                 self.run_animation(&window.internal_id, &plan, false)
                     .await?;
             } else {
                 self.apply_hidden_geometry(&window.internal_id, &hidden_rect)
                     .await?;
             }
+            self.kwin
+                .set_window_minimized(&window.internal_id, true)
+                .await?;
+            // Rest the window on a real screen instead of the off-screen park
+            // position: KWin re-derives each window's output from its geometry,
+            // and an off-screen window can end up with no output assigned until
+            // something else (e.g. a new window opening) forces a recompute.
+            // That made the taskbar entry disappear and reappear on its own.
+            self.apply_geometry(&window.internal_id, &visible_rect)
+                .await?;
 
             let mut registry = self.registry.lock().await;
             let app = registry
@@ -235,8 +251,6 @@ impl ToggleService {
         plan: &TransitionPlan,
         bring_to_front: bool,
     ) -> Result<()> {
-        self.apply_window_state(internal_id, plan.setup_state())
-            .await?;
         if bring_to_front {
             self.kwin.bring_window_to_foreground(internal_id).await?;
         }
@@ -508,14 +522,21 @@ impl ToggleService {
                         app.tracked_window_id.clone()?,
                         app.restore_geometry.clone(),
                         app.restore_no_border,
+                        app.visible,
                     ))
                 })
                 .collect()
         };
 
-        for (app_name, window_id, restore_geometry, restore_no_border) in tracked_windows {
+        for (app_name, window_id, restore_geometry, restore_no_border, visible) in tracked_windows
+        {
             if self.kwin.get_window(&window_id).await?.is_none() {
                 continue;
+            }
+
+            if !visible {
+                self.kwin.set_window_minimized(&window_id, false).await?;
+                info!("un-minimized app '{}' before shutdown", app_name);
             }
 
             if let Some(restore_geometry) = restore_geometry {
@@ -663,6 +684,14 @@ mod tests {
             Ok(())
         }
 
+        async fn set_window_minimized(&self, internal_id: &str, minimized: bool) -> Result<()> {
+            self.calls
+                .lock()
+                .await
+                .push(format!("minimized:{internal_id}:{minimized}"));
+            Ok(())
+        }
+
         async fn bring_window_to_foreground(&self, internal_id: &str) -> Result<()> {
             self.calls
                 .lock()
@@ -722,6 +751,19 @@ mod tests {
             caption: caption.into(),
             frame_geometry,
             no_border: false,
+            minimized: false,
+        }
+    }
+
+    fn minimized_window(
+        internal_id: &str,
+        identity: &str,
+        caption: &str,
+        frame_geometry: FrameGeometry,
+    ) -> ManagedWindow {
+        ManagedWindow {
+            minimized: true,
+            ..window(internal_id, identity, caption, frame_geometry)
         }
     }
 
@@ -806,7 +848,7 @@ mod tests {
     async fn toggle_on_uses_move_resize_foreground_order() {
         let managed = managed_app(app("dolphin", "super+f9", "dolphin"), "{abc}", false);
         let registry = Arc::new(Mutex::new(AppRegistry::new(vec![managed])));
-        let kwin = mock_kwin(Some(window(
+        let kwin = mock_kwin(Some(minimized_window(
             "{abc}",
             "dolphin",
             "Dolphin",
@@ -820,6 +862,7 @@ mod tests {
         assert_eq!(
             calls,
             vec![
+                "minimized:{abc}:false".to_string(),
                 "move:{abc}:0:0:1920:1080".to_string(),
                 "resize:{abc}:0:0:1920:1080".to_string(),
                 "foreground:{abc}".to_string()
@@ -831,7 +874,7 @@ mod tests {
     async fn toggle_on_uses_screen_under_cursor() {
         let managed = managed_app(app("dolphin", "super+f9", "dolphin"), "{abc}", false);
         let registry = Arc::new(Mutex::new(AppRegistry::new(vec![managed])));
-        let kwin = mock_kwin(Some(window(
+        let kwin = mock_kwin(Some(minimized_window(
             "{abc}",
             "dolphin",
             "Dolphin",
@@ -846,6 +889,7 @@ mod tests {
         assert_eq!(
             calls,
             vec![
+                "minimized:{abc}:false".to_string(),
                 "move:{abc}:0:-1080:1920:1080".to_string(),
                 "resize:{abc}:0:-1080:1920:1080".to_string(),
                 "foreground:{abc}".to_string()
@@ -857,7 +901,7 @@ mod tests {
     async fn toggle_on_refreshes_screens_after_external_display_disconnect() {
         let managed = managed_app(app("dolphin", "super+f9", "dolphin"), "{abc}", false);
         let registry = Arc::new(Mutex::new(AppRegistry::new(vec![managed])));
-        let kwin = mock_kwin(Some(window(
+        let kwin = mock_kwin(Some(minimized_window(
             "{abc}",
             "dolphin",
             "Dolphin",
@@ -880,6 +924,7 @@ mod tests {
         assert_eq!(
             calls,
             vec![
+                "minimized:{abc}:false".to_string(),
                 "move:{abc}:0:0:1920:1200".to_string(),
                 "resize:{abc}:0:0:1920:1200".to_string(),
                 "foreground:{abc}".to_string()
@@ -893,7 +938,7 @@ mod tests {
         app.hide_decorations = true;
         let managed = managed_app(app, "{abc}", false);
         let registry = Arc::new(Mutex::new(AppRegistry::new(vec![managed])));
-        let kwin = mock_kwin(Some(window(
+        let kwin = mock_kwin(Some(minimized_window(
             "{abc}",
             "dolphin",
             "Dolphin",
@@ -907,6 +952,7 @@ mod tests {
         assert_eq!(
             calls,
             vec![
+                "minimized:{abc}:false".to_string(),
                 "no_border:{abc}:true".to_string(),
                 "move:{abc}:0:0:1920:1080".to_string(),
                 "resize:{abc}:0:0:1920:1080".to_string(),
@@ -942,6 +988,7 @@ mod tests {
         assert_eq!(
             calls,
             vec![
+                "minimized:{abc}:false".to_string(),
                 "move:{abc}:10:20:300:400".to_string(),
                 "resize:{abc}:10:20:300:400".to_string(),
                 "no_border:{abc}:false".to_string()
@@ -1033,7 +1080,10 @@ mod tests {
             calls,
             vec![
                 "resize:{abc}:960:-1080:960:1080".to_string(),
-                "move:{abc}:960:-1080:960:1080".to_string()
+                "move:{abc}:960:-1080:960:1080".to_string(),
+                "minimized:{abc}:true".to_string(),
+                "move:{abc}:960:0:960:1080".to_string(),
+                "resize:{abc}:960:0:960:1080".to_string()
             ]
         );
     }
@@ -1065,7 +1115,10 @@ mod tests {
             calls,
             vec![
                 "resize:{abc}:960:-1080:960:1080".to_string(),
-                "move:{abc}:960:-1080:960:1080".to_string()
+                "move:{abc}:960:-1080:960:1080".to_string(),
+                "minimized:{abc}:true".to_string(),
+                "move:{abc}:960:0:960:1080".to_string(),
+                "resize:{abc}:960:0:960:1080".to_string()
             ]
         );
     }
@@ -1097,7 +1150,10 @@ mod tests {
             calls,
             vec![
                 "resize:{abc}:960:-2160:960:1080".to_string(),
-                "move:{abc}:960:-2160:960:1080".to_string()
+                "move:{abc}:960:-2160:960:1080".to_string(),
+                "minimized:{abc}:true".to_string(),
+                "move:{abc}:960:0:960:1080".to_string(),
+                "resize:{abc}:960:0:960:1080".to_string()
             ]
         );
     }
@@ -1106,7 +1162,7 @@ mod tests {
     async fn toggle_on_falls_back_to_active_window_screen() {
         let managed = managed_app(app("dolphin", "super+f9", "dolphin"), "{abc}", false);
         let registry = Arc::new(Mutex::new(AppRegistry::new(vec![managed])));
-        let kwin = mock_kwin(Some(window(
+        let kwin = mock_kwin(Some(minimized_window(
             "{abc}",
             "dolphin",
             "Dolphin",
@@ -1126,6 +1182,7 @@ mod tests {
         assert_eq!(
             calls,
             vec![
+                "minimized:{abc}:false".to_string(),
                 "move:{abc}:0:-1080:1920:1080".to_string(),
                 "resize:{abc}:0:-1080:1920:1080".to_string(),
                 "foreground:{abc}".to_string()
@@ -1174,7 +1231,10 @@ mod tests {
             calls,
             vec![
                 "resize:{fresh}:0:-1080:960:1080".to_string(),
-                "move:{fresh}:0:-1080:960:1080".to_string()
+                "move:{fresh}:0:-1080:960:1080".to_string(),
+                "minimized:{fresh}:true".to_string(),
+                "move:{fresh}:0:0:960:1080".to_string(),
+                "resize:{fresh}:0:0:960:1080".to_string()
             ]
         );
         let tracked = registry
@@ -1214,5 +1274,60 @@ mod tests {
         assert!(!app.visible);
         assert_eq!(app.tracked_window_id, None);
         drop(registry);
+    }
+
+    #[tokio::test]
+    async fn toggle_shows_app_minimized_externally_via_taskbar() {
+        let managed = managed_app(app("dolphin", "super+f9", "dolphin"), "{abc}", true);
+        let registry = Arc::new(Mutex::new(AppRegistry::new(vec![managed])));
+        let kwin = mock_kwin(Some(minimized_window(
+            "{abc}",
+            "dolphin",
+            "Dolphin",
+            geometry(0, 0, 1920, 1080),
+        )));
+        let service = ToggleService::new(registry.clone(), kwin.clone(), vec![screen()]);
+
+        service.toggle_app("dolphin").await.unwrap();
+
+        let calls = kwin.calls.lock().await.clone();
+        assert_eq!(
+            calls,
+            vec![
+                "minimized:{abc}:false".to_string(),
+                "move:{abc}:0:0:1920:1080".to_string(),
+                "resize:{abc}:0:0:1920:1080".to_string(),
+                "foreground:{abc}".to_string()
+            ]
+        );
+        assert!(registry.lock().await.managed_app("dolphin").unwrap().visible);
+    }
+
+    #[tokio::test]
+    async fn toggle_hides_app_restored_externally_via_taskbar() {
+        let managed = managed_app(app("dolphin", "super+f9", "dolphin"), "{abc}", false);
+        let registry = Arc::new(Mutex::new(AppRegistry::new(vec![managed])));
+        let kwin = mock_kwin(Some(window(
+            "{abc}",
+            "dolphin",
+            "Dolphin",
+            geometry(0, 0, 1920, 1080),
+        )));
+        let service = ToggleService::new(registry.clone(), kwin.clone(), vec![screen()]);
+
+        service.toggle_app("dolphin").await.unwrap();
+
+        let calls = kwin.calls.lock().await.clone();
+        assert_eq!(
+            calls,
+            vec![
+                "resize:{abc}:0:-1080:1920:1080".to_string(),
+                "move:{abc}:0:-1080:1920:1080".to_string(),
+                "minimized:{abc}:true".to_string(),
+                "move:{abc}:0:0:1920:1080".to_string(),
+                "resize:{abc}:0:0:1920:1080".to_string()
+            ]
+        );
+        assert!(!registry.lock().await.managed_app("dolphin").unwrap().visible);
     }
 }

@@ -25,6 +25,7 @@ const mapWindow = (window) => ({
         height: Math.round(window.frameGeometry.height),
     },
     noBorder: Boolean(window.noBorder),
+    minimized: Boolean(window.minimized),
 });
 
 kwin.getWindows = () => workspace.windowList();
@@ -166,6 +167,11 @@ cmds["SET_WINDOW_NO_BORDER"] = (params) => {
 cmds["BRING_WINDOW_TO_FOREGROUND"] = (params) => {
     const window = kwin.getWindowByInternalIdRequired(params.internalId);
     kwin.setActiveWindow(window);
+    return {};
+};
+cmds["SET_WINDOW_MINIMIZED"] = (params) => {
+    const window = kwin.getWindowByInternalIdRequired(params.internalId);
+    window.minimized = Boolean(params.minimized);
     return {};
 };
 cmds["REGISTER_HOT_KEY"] = (params) => {

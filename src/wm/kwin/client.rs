@@ -292,6 +292,15 @@ impl KWinClient {
         Ok(())
     }
 
+    pub async fn set_window_minimized(&self, internal_id: &str, minimized: bool) -> Result<()> {
+        self.send_command::<Value>(
+            "SET_WINDOW_MINIMIZED",
+            json!({ "internalId": internal_id, "minimized": minimized }),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn support_information_text(&self) -> Result<String> {
         let response: SupportInformationResponse = self
             .send_command("GET_SUPPORT_INFORMATION", json!({}))
@@ -379,6 +388,10 @@ impl WindowManager for KWinClient {
 
     async fn set_window_no_border(&self, internal_id: &str, no_border: bool) -> Result<()> {
         Self::set_window_no_border(self, internal_id, no_border).await
+    }
+
+    async fn set_window_minimized(&self, internal_id: &str, minimized: bool) -> Result<()> {
+        Self::set_window_minimized(self, internal_id, minimized).await
     }
 
     async fn bring_window_to_foreground(&self, internal_id: &str) -> Result<()> {
