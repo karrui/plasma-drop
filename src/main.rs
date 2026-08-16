@@ -36,6 +36,7 @@ use tracing_subscriber::EnvFilter;
 use wm::HOTKEY_PREFIX;
 use wm::kwin::client::KWinClient;
 use wm::kwin::script::ensure_script_file;
+use wm::kwin::types::KWinEvent;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -62,7 +63,7 @@ async fn main() -> Result<()> {
     init_tracing(&cli, &config);
     info!("loaded config from {}", config_path.display());
 
-    let (kwin, mut hotkey_rx) = KWinClient::connect().await?;
+    let (kwin, mut event_rx) = KWinClient::connect().await?;
     kwin.ensure_compatibility().await?;
 
     let script_path = ensure_script_file().await?;
@@ -104,11 +105,19 @@ async fn main() -> Result<()> {
 
     let result = loop {
         tokio::select! {
-            maybe_hotkey = hotkey_rx.recv() => {
-                match maybe_hotkey {
-                    Some(shortcut_id) => {
+            maybe_event = event_rx.recv() => {
+                match maybe_event {
+                    Some(KWinEvent::HotkeyPressed(shortcut_id)) => {
                         if let Err(error) = toggle_service.handle_shortcut(&shortcut_id).await {
                             warn!("hotkey '{}' failed: {error:#}", shortcut_id);
+                        }
+                    }
+                    Some(KWinEvent::ActiveWindowChanged(active_window_id)) => {
+                        if let Err(error) = toggle_service
+                            .handle_active_window_changed(active_window_id.as_deref())
+                            .await
+                        {
+                            warn!("active window change handling failed: {error:#}");
                         }
                     }
                     None => break Ok(()),

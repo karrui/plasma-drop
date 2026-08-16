@@ -1,4 +1,5 @@
 use crate::wm::kwin::client::SharedBridgeState;
+use crate::wm::kwin::types::KWinEvent;
 use tracing::{debug, error, info, warn};
 
 #[derive(Clone)]
@@ -29,8 +30,23 @@ impl PlasmaDropDbusObject {
 
     fn on_press_shortcut(&self, name: &str, modifier: &str, key_char: &str, key_code: &str) {
         let _ = (modifier, key_char, key_code);
-        if let Err(error) = self.state.hotkey_tx.send(name.to_string()) {
-            debug!("hotkey receiver dropped (shutdown): {error}");
+        if let Err(error) = self
+            .state
+            .event_tx
+            .send(KWinEvent::HotkeyPressed(name.to_string()))
+        {
+            debug!("event receiver dropped (shutdown): {error}");
+        }
+    }
+
+    fn on_active_window_changed(&self, internal_id: &str) {
+        let id = (!internal_id.is_empty()).then(|| internal_id.to_string());
+        if let Err(error) = self
+            .state
+            .event_tx
+            .send(KWinEvent::ActiveWindowChanged(id))
+        {
+            debug!("event receiver dropped (shutdown): {error}");
         }
     }
 }

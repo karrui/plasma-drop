@@ -25,6 +25,7 @@ The effective log level is resolved with the following priority (highest first):
 - `attach_mode`: `find` or `find-or-start`
 - `working_directory`: optional absolute working directory
 - `hide_decorations`: optional boolean; hide the `KWin` title bar/border while plasma-drop manages the window
+- `hide_on_focus_lost`: optional boolean (default `false`); automatically hide the app when a different window becomes active, e.g. clicking outside the dropped-down window
 
 ## Matching Behavior
 

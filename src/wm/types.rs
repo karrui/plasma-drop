@@ -104,6 +104,7 @@ mod tests {
             attach_mode: AttachMode::FindOrStart,
             working_directory: None,
             hide_decorations: false,
+            hide_on_focus_lost: false,
             placement: PlacementConfig::default(),
             animation: AnimationConfig::default(),
         }

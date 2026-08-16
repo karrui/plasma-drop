@@ -77,6 +77,27 @@ impl ToggleService {
         should_ignore_shortcut(&mut recent_hotkeys, shortcut_id, now)
     }
 
+    pub async fn handle_active_window_changed(
+        &self,
+        active_window_id: Option<&str>,
+    ) -> Result<()> {
+        let registry = self.registry.lock().await;
+        let Some(app_name) = registry.currently_visible_name().map(str::to_string) else {
+            return Ok(());
+        };
+        let app = require_app(&registry, &app_name)?;
+        if !app.config.hide_on_focus_lost {
+            return Ok(());
+        }
+        let tracked_window_id = app.tracked_window_id.clone();
+        drop(registry);
+
+        if tracked_window_id.as_deref() != active_window_id {
+            self.hide_app(&app_name).await?;
+        }
+        Ok(())
+    }
+
     pub async fn toggle_app(&self, app_name: &str) -> Result<()> {
         let registry = self.registry.lock().await;
         let other_visible = registry
@@ -712,6 +733,7 @@ mod tests {
             attach_mode: AttachMode::FindOrStart,
             working_directory: None,
             hide_decorations: false,
+            hide_on_focus_lost: false,
             placement: PlacementConfig::default(),
             animation: AnimationConfig::default(),
         }
@@ -1329,5 +1351,125 @@ mod tests {
             ]
         );
         assert!(!registry.lock().await.managed_app("dolphin").unwrap().visible);
+    }
+
+    #[tokio::test]
+    async fn active_window_change_hides_app_when_enabled_and_focus_moves_away() {
+        let mut config = app("dolphin", "super+f9", "dolphin");
+        config.hide_on_focus_lost = true;
+        let managed = managed_app(config, "{abc}", true);
+        let registry = Arc::new(Mutex::new(AppRegistry::new(vec![managed])));
+        registry.lock().await.set_visible("dolphin", true);
+        let kwin = mock_kwin(Some(window(
+            "{abc}",
+            "dolphin",
+            "Dolphin",
+            geometry(0, 0, 1920, 1080),
+        )));
+        let service = ToggleService::new(registry.clone(), kwin.clone(), vec![screen()]);
+
+        service
+            .handle_active_window_changed(Some("{other}"))
+            .await
+            .unwrap();
+
+        let calls = kwin.calls.lock().await.clone();
+        assert_eq!(
+            calls,
+            vec![
+                "resize:{abc}:0:-1080:1920:1080".to_string(),
+                "move:{abc}:0:-1080:1920:1080".to_string(),
+                "minimized:{abc}:true".to_string(),
+                "move:{abc}:0:0:1920:1080".to_string(),
+                "resize:{abc}:0:0:1920:1080".to_string()
+            ]
+        );
+        assert!(!registry.lock().await.managed_app("dolphin").unwrap().visible);
+    }
+
+    #[tokio::test]
+    async fn active_window_change_hides_app_when_nothing_is_focused() {
+        let mut config = app("dolphin", "super+f9", "dolphin");
+        config.hide_on_focus_lost = true;
+        let managed = managed_app(config, "{abc}", true);
+        let registry = Arc::new(Mutex::new(AppRegistry::new(vec![managed])));
+        registry.lock().await.set_visible("dolphin", true);
+        let kwin = mock_kwin(Some(window(
+            "{abc}",
+            "dolphin",
+            "Dolphin",
+            geometry(0, 0, 1920, 1080),
+        )));
+        let service = ToggleService::new(registry.clone(), kwin.clone(), vec![screen()]);
+
+        service.handle_active_window_changed(None).await.unwrap();
+
+        assert!(!registry.lock().await.managed_app("dolphin").unwrap().visible);
+    }
+
+    #[tokio::test]
+    async fn active_window_change_ignores_own_window_becoming_active() {
+        let mut config = app("dolphin", "super+f9", "dolphin");
+        config.hide_on_focus_lost = true;
+        let managed = managed_app(config, "{abc}", true);
+        let registry = Arc::new(Mutex::new(AppRegistry::new(vec![managed])));
+        registry.lock().await.set_visible("dolphin", true);
+        let kwin = mock_kwin(Some(window(
+            "{abc}",
+            "dolphin",
+            "Dolphin",
+            geometry(0, 0, 1920, 1080),
+        )));
+        let service = ToggleService::new(registry.clone(), kwin.clone(), vec![screen()]);
+
+        service
+            .handle_active_window_changed(Some("{abc}"))
+            .await
+            .unwrap();
+
+        assert!(kwin.calls.lock().await.is_empty());
+        assert!(registry.lock().await.managed_app("dolphin").unwrap().visible);
+    }
+
+    #[tokio::test]
+    async fn active_window_change_does_nothing_when_disabled() {
+        let managed = managed_app(app("dolphin", "super+f9", "dolphin"), "{abc}", true);
+        let registry = Arc::new(Mutex::new(AppRegistry::new(vec![managed])));
+        registry.lock().await.set_visible("dolphin", true);
+        let kwin = mock_kwin(Some(window(
+            "{abc}",
+            "dolphin",
+            "Dolphin",
+            geometry(0, 0, 1920, 1080),
+        )));
+        let service = ToggleService::new(registry.clone(), kwin.clone(), vec![screen()]);
+
+        service
+            .handle_active_window_changed(Some("{other}"))
+            .await
+            .unwrap();
+
+        assert!(kwin.calls.lock().await.is_empty());
+        assert!(registry.lock().await.managed_app("dolphin").unwrap().visible);
+    }
+
+    #[tokio::test]
+    async fn active_window_change_does_nothing_when_no_app_is_visible() {
+        let managed = managed_app(app("dolphin", "super+f9", "dolphin"), "{abc}", false);
+        let registry = Arc::new(Mutex::new(AppRegistry::new(vec![managed])));
+        let kwin = mock_kwin(Some(window(
+            "{abc}",
+            "dolphin",
+            "Dolphin",
+            geometry(0, 0, 1920, 1080),
+        )));
+        let service = ToggleService::new(registry, kwin.clone(), vec![screen()]);
+
+        service
+            .handle_active_window_changed(Some("{other}"))
+            .await
+            .unwrap();
+
+        assert!(kwin.calls.lock().await.is_empty());
     }
 }

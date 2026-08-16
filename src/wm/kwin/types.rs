@@ -42,3 +42,9 @@ pub struct CursorPositionResponse {
 pub struct SupportInformationResponse {
     pub text: String,
 }
+
+#[derive(Debug, Clone)]
+pub enum KWinEvent {
+    HotkeyPressed(String),
+    ActiveWindowChanged(Option<String>),
+}

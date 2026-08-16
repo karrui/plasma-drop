@@ -190,4 +190,14 @@ cmds["REGISTER_HOT_KEY"] = (params) => {
     return {};
 };
 
+workspace.windowActivated.connect((window) => {
+    callDBus(
+        bridge.DBUS_SERVICE,
+        bridge.DBUS_PATH,
+        bridge.DBUS_INTERFACE,
+        "OnActiveWindowChanged",
+        window ? window.internalId.toString() : ""
+    );
+});
+
 bridge.getNextCommand();

@@ -79,6 +79,7 @@ pub struct AppConfig {
     pub attach_mode: AttachMode,
     pub working_directory: Option<PathBuf>,
     pub hide_decorations: bool,
+    pub hide_on_focus_lost: bool,
     pub placement: PlacementConfig,
     pub animation: AnimationConfig,
 }
@@ -102,6 +103,7 @@ struct RawAppConfig {
     arguments: Option<Vec<String>>,
     working_directory: Option<PathBuf>,
     hide_decorations: Option<bool>,
+    hide_on_focus_lost: Option<bool>,
     placement: Option<RawPlacementConfig>,
     animation: Option<RawAnimationConfig>,
 }
@@ -222,6 +224,7 @@ impl Config {
                 attach_mode,
                 working_directory: app.working_directory,
                 hide_decorations: app.hide_decorations.unwrap_or(false),
+                hide_on_focus_lost: app.hide_on_focus_lost.unwrap_or(false),
                 placement,
                 animation,
             });
@@ -496,6 +499,7 @@ mod tests {
             arguments: None,
             working_directory: None,
             hide_decorations: None,
+            hide_on_focus_lost: None,
             placement: None,
             animation: None,
         }
@@ -558,6 +562,7 @@ mod tests {
         assert_eq!(config.apps[0].placement, PlacementConfig::default());
         assert_eq!(config.apps[0].animation, AnimationConfig::default());
         assert!(!config.apps[0].hide_decorations);
+        assert!(!config.apps[0].hide_on_focus_lost);
     }
 
     #[test]
@@ -567,6 +572,15 @@ mod tests {
 
         let config = Config::from_raw(make_raw(vec![raw])).unwrap();
         assert!(config.apps[0].hide_decorations);
+    }
+
+    #[test]
+    fn accepts_hide_on_focus_lost_option() {
+        let mut raw = app("terminal", "ctrl+grave");
+        raw.hide_on_focus_lost = Some(true);
+
+        let config = Config::from_raw(make_raw(vec![raw])).unwrap();
+        assert!(config.apps[0].hide_on_focus_lost);
     }
 
     #[test]

@@ -2,8 +2,8 @@ use crate::wm::kwin::proxies::{
     KGlobalAccelComponentProxy, KGlobalAccelProxy, KWinProxy, KWinScriptingProxy,
 };
 use crate::wm::kwin::types::{
-    CommandEnvelope, CursorPositionResponse, ResponseEnvelope, SupportInformationResponse,
-    WindowListResponse, WindowResponse,
+    CommandEnvelope, CursorPositionResponse, KWinEvent, ResponseEnvelope,
+    SupportInformationResponse, WindowListResponse, WindowResponse,
 };
 use crate::wm::{FrameGeometry, HOTKEY_PREFIX, ManagedWindow, Point, WindowManager};
 use anyhow::{Context, Result, anyhow, bail};
@@ -33,7 +33,7 @@ pub(crate) struct BridgeState {
     queue_notify: Notify,
     waiters: Mutex<HashMap<Uuid, oneshot::Sender<ResponseEnvelope>>>,
     last_enqueued: Mutex<Instant>,
-    pub hotkey_tx: mpsc::UnboundedSender<String>,
+    pub event_tx: mpsc::UnboundedSender<KWinEvent>,
 }
 
 pub type SharedBridgeState = Arc<BridgeState>;
@@ -81,14 +81,14 @@ pub struct KWinClient {
 }
 
 impl KWinClient {
-    pub async fn connect() -> Result<(Self, mpsc::UnboundedReceiver<String>)> {
-        let (hotkey_tx, hotkey_rx) = mpsc::unbounded_channel();
+    pub async fn connect() -> Result<(Self, mpsc::UnboundedReceiver<KWinEvent>)> {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
         let state = Arc::new(BridgeState {
             queue: Mutex::new(VecDeque::new()),
             queue_notify: Notify::new(),
             waiters: Mutex::new(HashMap::new()),
             last_enqueued: Mutex::new(Instant::now()),
-            hotkey_tx,
+            event_tx,
         });
 
         let object = PlasmaDropDbusObject {
@@ -133,7 +133,7 @@ impl KWinClient {
                 state,
                 keepalive_task,
             },
-            hotkey_rx,
+            event_rx,
         ))
     }
 
